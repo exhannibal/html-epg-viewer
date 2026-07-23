@@ -1,7 +1,7 @@
 /**
  * Humax / HA enhancements for html-epg-viewer:
  * - live search in sidebar + timeline navbar
- * - removes non-matching channels and programmes from the timeline
+ * - rebuilds timeline with only matching channels + programmes
  * - date/time jump navigation
  */
 (function (global) {
@@ -28,14 +28,8 @@
     return d;
   }
 
-  function channelMatches(channel, q) {
-    if (!q) return true;
-    var name = (channel.channelName || '').toLowerCase();
-    if (name.includes(q)) return true;
-    var list = channel.programList || [];
-    return list.some(function (p) {
-      return programMatches(p, q);
-    });
+  function channelNameMatches(channel, q) {
+    return (channel.channelName || '').toLowerCase().includes(q);
   }
 
   function programMatches(p, q) {
@@ -44,6 +38,46 @@
       (p.title || '').toLowerCase().includes(q) ||
       (p.desc || '').toLowerCase().includes(q)
     );
+  }
+
+  function buildFilteredChannels(all, q) {
+    if (!q) {
+      return all.slice();
+    }
+    var out = [];
+    all.forEach(function (ch) {
+      var nameHit = channelNameMatches(ch, q);
+      var fullList = ch.programList || [];
+      var progHits = fullList.filter(function (p) {
+        return programMatches(p, q);
+      });
+      if (!nameHit && !progHits.length) return;
+      out.push({
+        tvgId: ch.tvgId,
+        channelName: ch.channelName,
+        tvgLogo: ch.tvgLogo,
+        // Name-only match → keep full schedule; otherwise only matching programmes
+        programList: nameHit && !progHits.length ? fullList.slice() : progHits.length ? progHits : fullList.slice(),
+        _filterMode: nameHit && progHits.length ? 'both' : nameHit ? 'channel' : 'programmes',
+      });
+    });
+    // Prefer programme-filtered list when there are title hits even if name also hits
+    out.forEach(function (ch, idx) {
+      var original = all.find(function (c) {
+        return c.tvgId === ch.tvgId;
+      });
+      if (!original) return;
+      var nameHit = channelNameMatches(original, q);
+      var progHits = (original.programList || []).filter(function (p) {
+        return programMatches(p, q);
+      });
+      if (progHits.length) {
+        out[idx].programList = progHits;
+      } else if (nameHit) {
+        out[idx].programList = (original.programList || []).slice();
+      }
+    });
+    return out;
   }
 
   function HumaxEpgUi(opts) {
@@ -56,7 +90,9 @@
     this._lastQuery = '';
     this._debounce = null;
     this._bar = null;
-    this._syncingSearch = false;
+    this._bounds = null;
+    this._rebuildTimer = null;
+    this._viewChannels = null;
   }
 
   HumaxEpgUi.prototype._bindSearchInput = function (el) {
@@ -66,7 +102,7 @@
       clearTimeout(self._debounce);
       self._debounce = setTimeout(function () {
         self.applySearch(el.value);
-      }, 120);
+      }, 150);
     });
     el.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') {
@@ -81,6 +117,16 @@
       this.searchInput.placeholder = 'Search programmes & channels…';
       this._bindSearchInput(this.searchInput);
     }
+  };
+
+  HumaxEpgUi.prototype.captureBounds = function () {
+    var x = this.xmlepg;
+    if (!x || !x.earliestStartDate) return;
+    this._bounds = {
+      earliestStartDate: x.earliestStartDate,
+      latestStopDate: x.latestStopDate,
+      timelineLength: x.timelineLength,
+    };
   };
 
   HumaxEpgUi.prototype.ensureNavBar = function () {
@@ -137,8 +183,7 @@
   };
 
   HumaxEpgUi.prototype._syncSearchInputs = function (raw) {
-    this._syncingSearch = true;
-    var val = raw || '';
+    var val = raw == null ? '' : String(raw).trim();
     if (this.searchInput && this.searchInput.value !== val) {
       this.searchInput.value = val;
     }
@@ -146,7 +191,6 @@
     if (navSearch && navSearch.value !== val) {
       navSearch.value = val;
     }
-    this._syncingSearch = false;
   };
 
   HumaxEpgUi.prototype.showNavBar = function () {
@@ -206,7 +250,7 @@
   };
 
   HumaxEpgUi.prototype.annotateTimeline = function () {
-    var channels = this.getChannels() || [];
+    var channels = this._viewChannels || this.getChannels() || [];
     var rows = this.epgContainer.querySelectorAll('.table > .row');
     for (var i = 0; i < rows.length && i < channels.length; i++) {
       var ch = channels[i];
@@ -217,13 +261,11 @@
       var progIdx = 0;
       var list = ch.programList || [];
       cells.forEach(function (cell) {
-        if (!cell.querySelector('.program-title')) {
-          cell.classList.add('spacer-cell');
-          return;
-        }
+        if (!cell.querySelector('.program-title')) return;
         var prog = list[progIdx++];
         if (!prog) return;
         cell.classList.add('program-cell');
+        if (prog._searchHit) cell.classList.add('search-hit');
         cell.dataset.title = prog.title || '';
         cell.dataset.desc = prog.desc || '';
         cell.dataset.startMs = String(prog.startDate.getTime());
@@ -233,6 +275,7 @@
 
   HumaxEpgUi.prototype.renderPlaylist = function (list) {
     var self = this;
+    if (!this.videoList) return;
     this.videoList.innerHTML = '';
     list.forEach(function (channel) {
       var li = document.createElement('li');
@@ -254,132 +297,128 @@
   };
 
   HumaxEpgUi.prototype.openChannelDetail = function (channel) {
+    // Use currently filtered channel object (already has filtered programList)
     var q = this._lastQuery;
-    var original = channel.programList;
-    var filtered = null;
-    if (q && original) {
-      filtered = original.filter(function (p) {
-        return programMatches(p, q);
-      });
-      if (filtered.length) {
-        channel.programList = filtered;
-      } else {
-        filtered = null;
-      }
-    }
+    var list = channel.programList || [];
     this.epgContainer.style.display = 'none';
     this.hideNavBar();
     if (this.overlay) this.overlay.style.display = 'flex';
     var oldNote = document.getElementById('overlay-search-note');
     if (oldNote) oldNote.remove();
-    this.xmlepg.displayPrograms('overlay', channel.tvgId);
-    channel.programList = original;
 
-    if (q && filtered && filtered.length && this.overlay) {
+    // displayPrograms looks up by tvgId on xmlepg.channels — keep view channels mounted
+    this.xmlepg.displayPrograms('overlay', channel.tvgId);
+
+    if (q && list.length && this.overlay) {
       var note = document.createElement('div');
       note.id = 'overlay-search-note';
       note.textContent =
         'Showing ' +
-        filtered.length +
-        ' match' +
-        (filtered.length === 1 ? '' : 'es') +
-        ' for “' +
-        q +
-        '” · clear search for full schedule';
+        list.length +
+        ' programme' +
+        (list.length === 1 ? '' : 's') +
+        (q ? ' for “' + q + '”' : '') +
+        ' · Clear search for full schedule';
       this.overlay.insertBefore(note, this.overlay.firstChild);
     }
   };
 
+  HumaxEpgUi.prototype._markHits = function (channels, q) {
+    if (!q) return channels;
+    channels.forEach(function (ch) {
+      (ch.programList || []).forEach(function (p) {
+        p._searchHit = programMatches(p, q);
+      });
+    });
+    return channels;
+  };
+
+  HumaxEpgUi.prototype.rebuildTimeline = async function (channels) {
+    var x = this.xmlepg;
+    if (!x) return;
+    if (!this._bounds) this.captureBounds();
+    var bounds = this._bounds;
+    this._viewChannels = channels;
+    x.channels = channels;
+    if (bounds) {
+      x.earliestStartDate = bounds.earliestStartDate;
+      x.latestStopDate = bounds.latestStopDate;
+      x.timelineLength = bounds.timelineLength;
+    }
+    await x.displayAllPrograms('epg-container', 'xmlepg');
+    this.annotateTimeline();
+    this.ensureNavBar();
+    if (this.epgContainer.style.display !== 'none') {
+      x.clearTimelineNeedle && x.clearTimelineNeedle();
+      x.timelineNeedleRender();
+    }
+  };
+
   HumaxEpgUi.prototype.applySearch = function (raw) {
+    var self = this;
     var q = (raw || '').trim().toLowerCase();
     this._lastQuery = q;
     this._syncSearchInputs(raw == null ? '' : String(raw).trim());
 
     var all = this.getChannels() || [];
-    var matchedChannels = all.filter(function (ch) {
-      return channelMatches(ch, q);
+    var filtered = buildFilteredChannels(all, q);
+    this._markHits(filtered, q);
+
+    // Sidebar + timeline share the same filtered set
+    this.renderPlaylist(filtered);
+
+    var progCount = 0;
+    filtered.forEach(function (ch) {
+      progCount += (ch.programList || []).length;
     });
-    this.renderPlaylist(matchedChannels);
-
-    var rows = this.epgContainer.querySelectorAll('.table > .row');
-    var firstHitStart = null;
-    var visibleProgCount = 0;
-
-    for (var i = 0; i < rows.length; i++) {
-      var row = rows[i];
-      var tvgId = row.dataset.tvgId;
-      var ch = all.find(function (c) {
-        return c.tvgId === tvgId;
-      });
-      var showChannel = !q || (ch && channelMatches(ch, q));
-      row.classList.toggle('epg-row-hidden', !showChannel);
-      if (!showChannel) continue;
-
-      var nameHit = q && ch && (ch.channelName || '').toLowerCase().includes(q);
-      var cells = row.querySelectorAll('.cell:not(.pinned-channel-box)');
-      var anyProgKept = false;
-
-      cells.forEach(function (cell) {
-        cell.classList.remove('search-hit', 'epg-cell-hidden');
-        if (!cell.classList.contains('program-cell')) {
-          // Hide leading/trailing spacers while filtering so gaps collapse better
-          cell.classList.toggle('epg-cell-hidden', !!q);
-          return;
-        }
-        if (!q) return;
-
-        var hit =
-          (cell.dataset.title || '').toLowerCase().includes(q) ||
-          (cell.dataset.desc || '').toLowerCase().includes(q);
-
-        if (hit) {
-          cell.classList.add('search-hit');
-          anyProgKept = true;
-          visibleProgCount++;
-          if (firstHitStart === null && cell.dataset.startMs) {
-            firstHitStart = parseInt(cell.dataset.startMs, 10);
-          }
-        } else if (nameHit) {
-          // Channel-name match with no title hit: keep full schedule for that channel
-          anyProgKept = true;
-          visibleProgCount++;
-        } else {
-          cell.classList.add('epg-cell-hidden');
-        }
-      });
-
-      // If we only kept the channel because of a programme hit, but somehow none
-      // visible, hide the row
-      if (q && !nameHit && !anyProgKept) {
-        row.classList.add('epg-row-hidden');
-      }
-    }
-
     var statusText = '';
     if (q) {
       statusText =
-        matchedChannels.length +
+        filtered.length +
         ' ch · ' +
-        visibleProgCount +
+        progCount +
         ' prog' +
-        (visibleProgCount === 1 ? '' : 's');
+        (progCount === 1 ? '' : 's');
     }
     var status = document.getElementById('search-status');
     if (status) status.textContent = statusText;
     var navStatus = document.getElementById('epg-nav-search-status');
     if (navStatus) navStatus.textContent = statusText;
 
-    if (q && firstHitStart) {
-      this.scrollToDateTime(new Date(firstHitStart));
-      this._syncNavInputs(new Date(firstHitStart));
-    }
+    clearTimeout(this._rebuildTimer);
+    this._rebuildTimer = setTimeout(function () {
+      self.rebuildTimeline(filtered).then(function () {
+        if (!q) return;
+        var first = null;
+        filtered.some(function (ch) {
+          return (ch.programList || []).some(function (p) {
+            if (p._searchHit || programMatches(p, q)) {
+              first = p.startDate;
+              return true;
+            }
+            return false;
+          });
+        });
+        if (first) {
+          self.scrollToDateTime(first);
+          self._syncNavInputs(first);
+        }
+      });
+    }, 80);
   };
 
   HumaxEpgUi.prototype.onTimelineOpened = function () {
+    this.captureBounds();
     this.ensureNavBar();
-    this.annotateTimeline();
-    if (this._lastQuery) this.applySearch(this._lastQuery);
-    else this._syncNavInputs(new Date());
+    if (this._lastQuery) {
+      this.applySearch(this._lastQuery);
+    } else {
+      this._viewChannels = this.getChannels() || [];
+      this.xmlepg.channels = this._viewChannels;
+      this.annotateTimeline();
+      this._syncNavInputs(new Date());
+      this.renderPlaylist(this._viewChannels);
+    }
   };
 
   global.HumaxEpgUi = HumaxEpgUi;
