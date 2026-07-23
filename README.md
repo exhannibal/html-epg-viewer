@@ -32,3 +32,5 @@ Demo pattern: https://dbghelp.github.io/epg.html?file=
 - Bundle `xml-epg.js` / `xml-epg.css` locally (works under `/local/epg/`)
 - Drop Shaka / M3U8 player deps (guide-only)
 - Auto-open the all-channels timeline after load
+- **Live search** across programme titles/descriptions (and channel names): filters the channel list and highlights matches on the timeline
+- **Date / time navigation** bar on the timeline (day ±1, ±1h/±3h, Go, Now) — arrow keys still work for fine nudge

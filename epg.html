@@ -4,7 +4,6 @@
 <meta content="width=device-width,initial-scale=1" name="viewport">
 <link href="data:image/x-icon;," rel="icon">
 <title>Humax EPG (html-epg-viewer)</title>
-<!-- Local assets (fork): avoid CORS / github.io dependency when hosted on HA /local/epg/ -->
 <link href="xml-epg.css" rel="stylesheet">
 <style>
 body{margin:0;font-family:Arial,sans-serif;display:flex;height:100vh;background-color:#282c34}
@@ -24,11 +23,12 @@ body{margin:0;font-family:Arial,sans-serif;display:flex;height:100vh;background-
 #hint{font-size:.85em;color:#aaa;margin-bottom:12px;line-height:1.35}
 </style>
 <div id="playlist">
-  <div id="hint">Fork of <a href="https://github.com/dbghelp/html-epg-viewer" style="color:#61dafb">html-epg-viewer</a> — defaults to Humax XMLTV on this HA host.</div>
+  <div id="hint">Fork of <a href="https://github.com/dbghelp/html-epg-viewer" style="color:#61dafb">html-epg-viewer</a> — Humax XMLTV on this HA host.</div>
   <input id="url-input" placeholder="XMLTV URL or relative path" value="humax-epg.xml">
   <button id="fetch-button">Load EPG</button>
   <button id="epg-button" onclick="openEPG()">EPG (all channels)</button>
-  <input id="search-input" placeholder="Search channels…">
+  <input id="search-input" placeholder="Search programmes &amp; channels…">
+  <div id="search-status"></div>
   <ul id="video-list"></ul>
 </div>
 <div id="overlay" style="display:flex"></div>
@@ -36,20 +36,34 @@ body{margin:0;font-family:Arial,sans-serif;display:flex;height:100vh;background-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.0.4/pako.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="xml-epg.js"></script>
+<script src="humax-epg-ui.js"></script>
 <script>
 var xmlepg = new XMLEPG();
 var overlay = document.getElementById('overlay');
 var epgContainer = document.getElementById('epg-container');
-/** Default same-origin Humax cache (no CORS). Override with ?file=… */
 var DEFAULT_EPG = 'humax-epg.xml';
+var allChannels = [];
+var humaxUi = null;
 
 document.addEventListener('DOMContentLoaded', () => {
   const videoList = document.getElementById('video-list');
   const searchInput = document.getElementById('search-input');
   const urlInput = document.getElementById('url-input');
   const fetchButton = document.getElementById('fetch-button');
-  var channels;
-  var lastActiveChannel;
+
+  humaxUi = new HumaxEpgUi({
+    xmlepg: xmlepg,
+    epgContainer: epgContainer,
+    videoList: videoList,
+    searchInput: searchInput,
+    getChannels: function () { return allChannels; },
+    onPlaylistClick: function (channel) {
+      epgContainer.style.display = 'none';
+      overlay.style.display = 'flex';
+      xmlepg.displayPrograms('overlay', channel.tvgId);
+    },
+  });
+  humaxUi.install();
 
   var extracted = extractAppendedURL();
   urlInput.value = extracted;
@@ -64,19 +78,16 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const response = await fetch(url);
       if (!response.ok) {
-        console.error('Failed to fetch EPG:', response.status, url);
         alert('Failed to load EPG (' + response.status + '): ' + url);
         return;
       }
-      await response.text(); // warm / validate reachability
-      const urls = [url];
-      await xmlepg.load(urls);
+      await response.text();
+      await xmlepg.load([url]);
       await xmlepg.displayAllPrograms('epg-container', 'xmlepg');
       document.getElementById('epg-button').style.display = 'block';
-      channels = xmlepg.channels;
-      updatePlaylist(channels);
-      document.getElementById('search-input').style.display = 'block';
-      // Open timeline immediately for Humax / local use
+      allChannels = xmlepg.channels || [];
+      searchInput.style.display = 'block';
+      humaxUi.renderPlaylist(allChannels);
       openEPG();
     } catch (error) {
       console.error('Error fetching EPG:', error);
@@ -85,47 +96,14 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function extractAppendedURL() {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('file') || DEFAULT_EPG;
+    return new URLSearchParams(window.location.search).get('file') || DEFAULT_EPG;
   }
-
-  function updatePlaylist(channels) {
-    videoList.innerHTML = '';
-    channels.forEach(channel => {
-      const listItem = document.createElement('li');
-      const logo = channel.tvgLogo || '';
-      listItem.innerHTML = (logo ? `<img src="${logo}" alt="">` : '') +
-        `<span class="video-title">${channel.channelName}</span>`;
-      listItem.onclick = () => {
-        epgContainer.style.display = 'none';
-        overlay.style.display = 'flex';
-        xmlepg.displayPrograms('overlay', channel.tvgId);
-        const children = videoList.getElementsByTagName('li');
-        for (let i = 0; i < children.length; i++) {
-          children[i].classList.remove('active');
-        }
-        listItem.classList.add('active');
-        lastActiveChannel = listItem.innerHTML;
-      };
-      videoList.appendChild(listItem);
-    });
-  }
-
-  function filterPlaylist(searchTerm) {
-    const filtered = channels.filter(c =>
-      c.channelName.toLowerCase().includes(searchTerm.toLowerCase())
-    );
-    updatePlaylist(filtered);
-  }
-
-  searchInput.addEventListener('input', (event) => {
-    filterPlaylist(event.target.value);
-  });
 });
 
 function openEPG() {
   overlay.style.display = 'none';
   epgContainer.style.display = 'block';
   xmlepg.timelineNeedleRender();
+  if (humaxUi) humaxUi.onTimelineOpened();
 }
 </script>
