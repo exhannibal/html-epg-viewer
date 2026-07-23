@@ -1,8 +1,8 @@
 /**
  * Humax / HA enhancements for html-epg-viewer:
- * - live search across program titles/descriptions (filters channels, highlights timeline)
- * - filtered per-channel programme list when a search is active
- * - date/time jump navigation on the EPG timeline
+ * - live search in sidebar + timeline navbar
+ * - removes non-matching channels and programmes from the timeline
+ * - date/time jump navigation
  */
 (function (global) {
   'use strict';
@@ -56,35 +56,47 @@
     this._lastQuery = '';
     this._debounce = null;
     this._bar = null;
+    this._syncingSearch = false;
   }
 
-  HumaxEpgUi.prototype.install = function () {
+  HumaxEpgUi.prototype._bindSearchInput = function (el) {
+    if (!el) return;
     var self = this;
+    el.addEventListener('input', function () {
+      clearTimeout(self._debounce);
+      self._debounce = setTimeout(function () {
+        self.applySearch(el.value);
+      }, 120);
+    });
+    el.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') {
+        el.value = '';
+        self.applySearch('');
+      }
+    });
+  };
+
+  HumaxEpgUi.prototype.install = function () {
     if (this.searchInput) {
       this.searchInput.placeholder = 'Search programmes & channels…';
-      this.searchInput.addEventListener('input', function () {
-        clearTimeout(self._debounce);
-        self._debounce = setTimeout(function () {
-          self.applySearch(self.searchInput.value);
-        }, 120);
-      });
-      this.searchInput.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') {
-          self.searchInput.value = '';
-          self.applySearch('');
-        }
-      });
+      this._bindSearchInput(this.searchInput);
     }
   };
 
   HumaxEpgUi.prototype.ensureNavBar = function () {
     if (this._bar && document.body.contains(this._bar)) {
       this.showNavBar();
+      this._syncSearchInputs(this._lastQuery);
       return;
     }
     var bar = document.createElement('div');
     bar.id = 'epg-nav-bar';
     bar.innerHTML =
+      '<div class="epg-nav-group epg-nav-search">' +
+      '<input type="search" id="epg-nav-search" placeholder="Search programmes &amp; channels…" autocomplete="off">' +
+      '<button type="button" data-nav="clear-search" title="Clear search">Clear</button>' +
+      '<span id="epg-nav-search-status"></span>' +
+      '</div>' +
       '<div class="epg-nav-group">' +
       '<button type="button" data-nav="day-1" title="Previous day">◀ Day</button>' +
       '<input type="date" id="epg-nav-date" aria-label="Date">' +
@@ -99,15 +111,20 @@
       '<button type="button" data-nav="h+1" title="Forward 1 hour">+1h</button>' +
       '<button type="button" data-nav="h+3" title="Forward 3 hours">+3h</button>' +
       '</div>';
-    // Attach to body so displayAllPrograms() innerHTML wipe cannot destroy it
     document.body.appendChild(bar);
     this._bar = bar;
     this._syncNavInputs(new Date());
+    this._bindSearchInput(bar.querySelector('#epg-nav-search'));
     var self = this;
     bar.addEventListener('click', function (e) {
       var btn = e.target.closest('button[data-nav]');
       if (!btn) return;
-      self._handleNav(btn.getAttribute('data-nav'));
+      var action = btn.getAttribute('data-nav');
+      if (action === 'clear-search') {
+        self.applySearch('');
+        return;
+      }
+      self._handleNav(action);
     });
     bar.querySelector('#epg-nav-date').addEventListener('change', function () {
       self._handleNav('go');
@@ -115,7 +132,21 @@
     bar.querySelector('#epg-nav-time').addEventListener('keydown', function (e) {
       if (e.key === 'Enter') self._handleNav('go');
     });
+    this._syncSearchInputs(this._lastQuery);
     this.showNavBar();
+  };
+
+  HumaxEpgUi.prototype._syncSearchInputs = function (raw) {
+    this._syncingSearch = true;
+    var val = raw || '';
+    if (this.searchInput && this.searchInput.value !== val) {
+      this.searchInput.value = val;
+    }
+    var navSearch = document.getElementById('epg-nav-search');
+    if (navSearch && navSearch.value !== val) {
+      navSearch.value = val;
+    }
+    this._syncingSearch = false;
   };
 
   HumaxEpgUi.prototype.showNavBar = function () {
@@ -186,7 +217,10 @@
       var progIdx = 0;
       var list = ch.programList || [];
       cells.forEach(function (cell) {
-        if (!cell.querySelector('.program-title')) return;
+        if (!cell.querySelector('.program-title')) {
+          cell.classList.add('spacer-cell');
+          return;
+        }
         var prog = list[progIdx++];
         if (!prog) return;
         cell.classList.add('program-cell');
@@ -219,7 +253,6 @@
     });
   };
 
-  /** Per-channel view: honour active search by filtering programmes. */
   HumaxEpgUi.prototype.openChannelDetail = function (channel) {
     var q = this._lastQuery;
     var original = channel.programList;
@@ -228,7 +261,6 @@
       filtered = original.filter(function (p) {
         return programMatches(p, q);
       });
-      // Prefer filtered hits; if only the channel name matched, keep full list
       if (filtered.length) {
         channel.programList = filtered;
       } else {
@@ -261,6 +293,8 @@
   HumaxEpgUi.prototype.applySearch = function (raw) {
     var q = (raw || '').trim().toLowerCase();
     this._lastQuery = q;
+    this._syncSearchInputs(raw == null ? '' : String(raw).trim());
+
     var all = this.getChannels() || [];
     var matchedChannels = all.filter(function (ch) {
       return channelMatches(ch, q);
@@ -269,42 +303,71 @@
 
     var rows = this.epgContainer.querySelectorAll('.table > .row');
     var firstHitStart = null;
+    var visibleProgCount = 0;
+
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
       var tvgId = row.dataset.tvgId;
       var ch = all.find(function (c) {
         return c.tvgId === tvgId;
       });
-      var show = !q || (ch && channelMatches(ch, q));
-      row.classList.toggle('epg-row-hidden', !show);
-      if (!show) continue;
+      var showChannel = !q || (ch && channelMatches(ch, q));
+      row.classList.toggle('epg-row-hidden', !showChannel);
+      if (!showChannel) continue;
 
-      var cells = row.querySelectorAll('.program-cell');
+      var nameHit = q && ch && (ch.channelName || '').toLowerCase().includes(q);
+      var cells = row.querySelectorAll('.cell:not(.pinned-channel-box)');
+      var anyProgKept = false;
+
       cells.forEach(function (cell) {
-        cell.classList.remove('search-hit', 'search-miss');
+        cell.classList.remove('search-hit', 'epg-cell-hidden');
+        if (!cell.classList.contains('program-cell')) {
+          // Hide leading/trailing spacers while filtering so gaps collapse better
+          cell.classList.toggle('epg-cell-hidden', !!q);
+          return;
+        }
         if (!q) return;
+
         var hit =
           (cell.dataset.title || '').toLowerCase().includes(q) ||
           (cell.dataset.desc || '').toLowerCase().includes(q);
-        cell.classList.add(hit ? 'search-hit' : 'search-miss');
-        if (hit && firstHitStart === null && cell.dataset.startMs) {
-          firstHitStart = parseInt(cell.dataset.startMs, 10);
+
+        if (hit) {
+          cell.classList.add('search-hit');
+          anyProgKept = true;
+          visibleProgCount++;
+          if (firstHitStart === null && cell.dataset.startMs) {
+            firstHitStart = parseInt(cell.dataset.startMs, 10);
+          }
+        } else if (nameHit) {
+          // Channel-name match with no title hit: keep full schedule for that channel
+          anyProgKept = true;
+          visibleProgCount++;
+        } else {
+          cell.classList.add('epg-cell-hidden');
         }
       });
-    }
 
-    var status = document.getElementById('search-status');
-    if (status) {
-      if (!q) {
-        status.textContent = '';
-      } else {
-        status.textContent =
-          matchedChannels.length +
-          ' channel' +
-          (matchedChannels.length === 1 ? '' : 's') +
-          ' · click a channel for matching programmes only';
+      // If we only kept the channel because of a programme hit, but somehow none
+      // visible, hide the row
+      if (q && !nameHit && !anyProgKept) {
+        row.classList.add('epg-row-hidden');
       }
     }
+
+    var statusText = '';
+    if (q) {
+      statusText =
+        matchedChannels.length +
+        ' ch · ' +
+        visibleProgCount +
+        ' prog' +
+        (visibleProgCount === 1 ? '' : 's');
+    }
+    var status = document.getElementById('search-status');
+    if (status) status.textContent = statusText;
+    var navStatus = document.getElementById('epg-nav-search-status');
+    if (navStatus) navStatus.textContent = statusText;
 
     if (q && firstHitStart) {
       this.scrollToDateTime(new Date(firstHitStart));
@@ -320,5 +383,4 @@
   };
 
   global.HumaxEpgUi = HumaxEpgUi;
-  global.humaxProgramMatches = programMatches;
 })(window);
