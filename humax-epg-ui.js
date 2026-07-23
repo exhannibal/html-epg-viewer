@@ -130,56 +130,81 @@
   };
 
   HumaxEpgUi.prototype.ensureNavBar = function () {
-    if (this._bar && document.body.contains(this._bar)) {
-      this.showNavBar();
-      this._syncSearchInputs(this._lastQuery);
-      return;
+    var thead = this.epgContainer && this.epgContainer.querySelector('.thead');
+    if (!thead) return;
+
+    var created = false;
+    var bar = this._bar;
+    if (!bar || !bar.id) {
+      bar = document.createElement('div');
+      bar.id = 'epg-nav-bar';
+      bar.innerHTML =
+        '<div class="epg-nav-group epg-nav-search">' +
+        '<input type="search" id="epg-nav-search" placeholder="Search programmes &amp; channels…" autocomplete="off">' +
+        '<button type="button" data-nav="clear-search" title="Clear search">Clear</button>' +
+        '<span id="epg-nav-search-status"></span>' +
+        '</div>' +
+        '<div class="epg-nav-group">' +
+        '<button type="button" data-nav="day-1" title="Previous day">◀ Day</button>' +
+        '<input type="date" id="epg-nav-date" aria-label="Date">' +
+        '<button type="button" data-nav="day+1" title="Next day">Day ▶</button>' +
+        '</div>' +
+        '<div class="epg-nav-group">' +
+        '<button type="button" data-nav="h-3" title="Back 3 hours">−3h</button>' +
+        '<button type="button" data-nav="h-1" title="Back 1 hour">−1h</button>' +
+        '<input type="time" id="epg-nav-time" aria-label="Time">' +
+        '<button type="button" data-nav="go" title="Jump to date/time">Go</button>' +
+        '<button type="button" data-nav="now" title="Jump to now">Now</button>' +
+        '<button type="button" data-nav="h+1" title="Forward 1 hour">+1h</button>' +
+        '<button type="button" data-nav="h+3" title="Forward 3 hours">+3h</button>' +
+        '</div>';
+      this._bar = bar;
+      created = true;
     }
-    var bar = document.createElement('div');
-    bar.id = 'epg-nav-bar';
-    bar.innerHTML =
-      '<div class="epg-nav-group epg-nav-search">' +
-      '<input type="search" id="epg-nav-search" placeholder="Search programmes &amp; channels…" autocomplete="off">' +
-      '<button type="button" data-nav="clear-search" title="Clear search">Clear</button>' +
-      '<span id="epg-nav-search-status"></span>' +
-      '</div>' +
-      '<div class="epg-nav-group">' +
-      '<button type="button" data-nav="day-1" title="Previous day">◀ Day</button>' +
-      '<input type="date" id="epg-nav-date" aria-label="Date">' +
-      '<button type="button" data-nav="day+1" title="Next day">Day ▶</button>' +
-      '</div>' +
-      '<div class="epg-nav-group">' +
-      '<button type="button" data-nav="h-3" title="Back 3 hours">−3h</button>' +
-      '<button type="button" data-nav="h-1" title="Back 1 hour">−1h</button>' +
-      '<input type="time" id="epg-nav-time" aria-label="Time">' +
-      '<button type="button" data-nav="go" title="Jump to date/time">Go</button>' +
-      '<button type="button" data-nav="now" title="Jump to now">Now</button>' +
-      '<button type="button" data-nav="h+1" title="Forward 1 hour">+1h</button>' +
-      '<button type="button" data-nav="h+3" title="Forward 3 hours">+3h</button>' +
-      '</div>';
-    document.body.appendChild(bar);
-    this._bar = bar;
-    this._syncNavInputs(new Date());
-    this._bindSearchInput(bar.querySelector('#epg-nav-search'));
-    var self = this;
-    bar.addEventListener('click', function (e) {
-      var btn = e.target.closest('button[data-nav]');
-      if (!btn) return;
-      var action = btn.getAttribute('data-nav');
-      if (action === 'clear-search') {
-        self.applySearch('');
-        return;
+
+    // Sit as the first row inside .thead, above Day/Time
+    if (bar.parentNode !== thead || thead.firstElementChild !== bar) {
+      thead.insertBefore(bar, thead.firstChild);
+    }
+
+    if (created) {
+      this._syncNavInputs(new Date());
+      this._bindSearchInput(bar.querySelector('#epg-nav-search'));
+      var self = this;
+      bar.addEventListener('click', function (e) {
+        var btn = e.target.closest('button[data-nav]');
+        if (!btn) return;
+        var action = btn.getAttribute('data-nav');
+        if (action === 'clear-search') {
+          self.applySearch('');
+          return;
+        }
+        self._handleNav(action);
+      });
+      bar.querySelector('#epg-nav-date').addEventListener('change', function () {
+        self._handleNav('go');
+      });
+      bar.querySelector('#epg-nav-time').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') self._handleNav('go');
+      });
+      if (!this._navResizeBound) {
+        this._navResizeBound = true;
+        var syncW = function () {
+          self._syncNavWidth();
+        };
+        window.addEventListener('resize', syncW);
+        this.epgContainer.addEventListener('scroll', syncW, { passive: true });
       }
-      self._handleNav(action);
-    });
-    bar.querySelector('#epg-nav-date').addEventListener('change', function () {
-      self._handleNav('go');
-    });
-    bar.querySelector('#epg-nav-time').addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') self._handleNav('go');
-    });
+    }
+
     this._syncSearchInputs(this._lastQuery);
+    this._syncNavWidth();
     this.showNavBar();
+  };
+
+  HumaxEpgUi.prototype._syncNavWidth = function () {
+    if (!this._bar || !this.epgContainer) return;
+    this._bar.style.width = this.epgContainer.clientWidth + 'px';
   };
 
   HumaxEpgUi.prototype._syncSearchInputs = function (raw) {
