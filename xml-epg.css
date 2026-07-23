@@ -3,11 +3,12 @@
 .epg-row-hidden{display:none!important}
 .program-cell.search-hit{outline:2px solid #61dafb!important;background-color:#1e4a5a!important;z-index:2}
 .program-cell.search-miss{opacity:.28}
-#epg-nav-bar{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:1500;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center;max-width:min(960px,92vw);padding:8px 12px;background:#1a1d22ee;border:1px solid #444;border-radius:8px;box-shadow:0 4px 16px #0008;color:#fff;font-size:13px}
+#epg-nav-bar{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:10050;display:none;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center;max-width:min(960px,92vw);padding:8px 12px;background:#1a1d22f2;border:1px solid #61dafb;border-radius:8px;box-shadow:0 4px 16px #000a;color:#fff;font-size:13px}
+#epg-nav-bar.epg-nav-visible{display:flex}
 .epg-nav-group{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 #epg-nav-bar button{background:#61dafb;color:#000;border:none;border-radius:5px;padding:6px 10px;cursor:pointer;font-weight:600}
 #epg-nav-bar button:hover{background:#4fa3c4}
 #epg-nav-bar input[type=date],#epg-nav-bar input[type=time]{background:#3c4043;color:#fff;border:1px solid #555;border-radius:5px;padding:5px 8px}
-.epg-nav-hint{color:#aaa;font-weight:400;font-size:12px}
 #search-status{font-size:.8em;color:#9ad;min-height:1.2em;margin:0 0 8px}
-#epg-container{padding-top:56px}
+#overlay-search-note{width:98%;margin:8px auto;padding:10px 14px;background:#1e4a5a;border:1px solid #61dafb;border-radius:6px;color:#fff;font-size:.95em}
+#close-button{z-index:10060}

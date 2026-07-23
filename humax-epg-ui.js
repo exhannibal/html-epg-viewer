@@ -1,6 +1,7 @@
 /**
  * Humax / HA enhancements for html-epg-viewer:
  * - live search across program titles/descriptions (filters channels, highlights timeline)
+ * - filtered per-channel programme list when a search is active
  * - date/time jump navigation on the EPG timeline
  */
 (function (global) {
@@ -20,23 +21,20 @@
 
   function parseLocalDateTime(dateStr, timeStr) {
     if (!dateStr) return null;
-    const t = timeStr && timeStr.length ? timeStr : '00:00';
-    const parts = t.split(':');
-    const d = new Date(dateStr + 'T00:00:00');
+    var t = timeStr && timeStr.length ? timeStr : '00:00';
+    var parts = t.split(':');
+    var d = new Date(dateStr + 'T00:00:00');
     d.setHours(parseInt(parts[0], 10) || 0, parseInt(parts[1], 10) || 0, 0, 0);
     return d;
   }
 
   function channelMatches(channel, q) {
     if (!q) return true;
-    const name = (channel.channelName || '').toLowerCase();
+    var name = (channel.channelName || '').toLowerCase();
     if (name.includes(q)) return true;
-    const list = channel.programList || [];
+    var list = channel.programList || [];
     return list.some(function (p) {
-      return (
-        (p.title || '').toLowerCase().includes(q) ||
-        (p.desc || '').toLowerCase().includes(q)
-      );
+      return programMatches(p, q);
     });
   }
 
@@ -51,13 +49,13 @@
   function HumaxEpgUi(opts) {
     this.xmlepg = opts.xmlepg;
     this.epgContainer = opts.epgContainer;
+    this.overlay = opts.overlay;
     this.videoList = opts.videoList;
     this.searchInput = opts.searchInput;
-    this.getChannels = opts.getChannels; // () => current full channel list
-    this.onPlaylistClick = opts.onPlaylistClick; // (channel) => void
-    this._navBuilt = false;
+    this.getChannels = opts.getChannels;
     this._lastQuery = '';
     this._debounce = null;
+    this._bar = null;
   }
 
   HumaxEpgUi.prototype.install = function () {
@@ -80,7 +78,10 @@
   };
 
   HumaxEpgUi.prototype.ensureNavBar = function () {
-    if (this._navBuilt) return;
+    if (this._bar && document.body.contains(this._bar)) {
+      this.showNavBar();
+      return;
+    }
     var bar = document.createElement('div');
     bar.id = 'epg-nav-bar';
     bar.innerHTML =
@@ -97,9 +98,10 @@
       '<button type="button" data-nav="now" title="Jump to now">Now</button>' +
       '<button type="button" data-nav="h+1" title="Forward 1 hour">+1h</button>' +
       '<button type="button" data-nav="h+3" title="Forward 3 hours">+3h</button>' +
-      '</div>' +
-      '<div class="epg-nav-group epg-nav-hint">Arrow keys still nudge; Esc clears search</div>';
-    this.epgContainer.appendChild(bar);
+      '</div>';
+    // Attach to body so displayAllPrograms() innerHTML wipe cannot destroy it
+    document.body.appendChild(bar);
+    this._bar = bar;
     this._syncNavInputs(new Date());
     var self = this;
     bar.addEventListener('click', function (e) {
@@ -113,7 +115,15 @@
     bar.querySelector('#epg-nav-time').addEventListener('keydown', function (e) {
       if (e.key === 'Enter') self._handleNav('go');
     });
-    this._navBuilt = true;
+    this.showNavBar();
+  };
+
+  HumaxEpgUi.prototype.showNavBar = function () {
+    if (this._bar) this._bar.classList.add('epg-nav-visible');
+  };
+
+  HumaxEpgUi.prototype.hideNavBar = function () {
+    if (this._bar) this._bar.classList.remove('epg-nav-visible');
   };
 
   HumaxEpgUi.prototype._syncNavInputs = function (d) {
@@ -149,8 +159,6 @@
       d.setHours(d.getHours() + 1);
     } else if (action === 'h+3') {
       d.setHours(d.getHours() + 3);
-    } else if (action === 'go') {
-      /* use inputs as-is */
     }
     this._syncNavInputs(d);
     this.scrollToDateTime(d);
@@ -202,13 +210,52 @@
         channel.channelName +
         '</span>';
       li.addEventListener('click', function () {
-        self.onPlaylistClick(channel);
+        self.openChannelDetail(channel);
         var kids = self.videoList.getElementsByTagName('li');
         for (var i = 0; i < kids.length; i++) kids[i].classList.remove('active');
         li.classList.add('active');
       });
       self.videoList.appendChild(li);
     });
+  };
+
+  /** Per-channel view: honour active search by filtering programmes. */
+  HumaxEpgUi.prototype.openChannelDetail = function (channel) {
+    var q = this._lastQuery;
+    var original = channel.programList;
+    var filtered = null;
+    if (q && original) {
+      filtered = original.filter(function (p) {
+        return programMatches(p, q);
+      });
+      // Prefer filtered hits; if only the channel name matched, keep full list
+      if (filtered.length) {
+        channel.programList = filtered;
+      } else {
+        filtered = null;
+      }
+    }
+    this.epgContainer.style.display = 'none';
+    this.hideNavBar();
+    if (this.overlay) this.overlay.style.display = 'flex';
+    var oldNote = document.getElementById('overlay-search-note');
+    if (oldNote) oldNote.remove();
+    this.xmlepg.displayPrograms('overlay', channel.tvgId);
+    channel.programList = original;
+
+    if (q && filtered && filtered.length && this.overlay) {
+      var note = document.createElement('div');
+      note.id = 'overlay-search-note';
+      note.textContent =
+        'Showing ' +
+        filtered.length +
+        ' match' +
+        (filtered.length === 1 ? '' : 'es') +
+        ' for “' +
+        q +
+        '” · clear search for full schedule';
+      this.overlay.insertBefore(note, this.overlay.firstChild);
+    }
   };
 
   HumaxEpgUi.prototype.applySearch = function (raw) {
@@ -255,7 +302,7 @@
           matchedChannels.length +
           ' channel' +
           (matchedChannels.length === 1 ? '' : 's') +
-          ' · highlighted matches on timeline';
+          ' · click a channel for matching programmes only';
       }
     }
 
@@ -273,4 +320,5 @@
   };
 
   global.HumaxEpgUi = HumaxEpgUi;
+  global.humaxProgramMatches = programMatches;
 })(window);
