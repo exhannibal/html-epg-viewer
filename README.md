@@ -1,40 +1,34 @@
-# html-epg-viewer
+# html-epg-viewer (fork)
 
-## Overview
+Fork of [dbghelp/html-epg-viewer](https://github.com/dbghelp/html-epg-viewer) with a **Humax / Home Assistant** default.
 
-HTML EPG viewer for epg.xml
+## Humax on Home Assistant
 
-https://dbghelp.github.io/epg.html?file=<link to epg.xml\>
+Serve this folder next to your XMLTV cache under HA `www/epg/`:
 
-[https://dbghelp.github.io/epg.html?file=https://raw.githubusercontent.com/dbghelp/mewatch-EPG/refs/heads/main/mewatch.xml](https://dbghelp.github.io/epg.html?file=https://raw.githubusercontent.com/dbghelp/mewatch-EPG/refs/heads/main/mewatch.xml)
+| File | Role |
+|------|------|
+| `epg.html` | Viewer (defaults to `humax-epg.xml`) |
+| `xml-epg.js` / `xml-epg.css` | Local copies (no github.io / CORS) |
+| `humax-epg.xml` | Your Humax Freeview export |
 
+Open (same origin → no CORS):
 
-## Features
+`http://homeassistant.local:8123/local/epg/epg.html`
 
-- View EPG for specific channel (with thumbnail images from epg.xml)
-- View EPG for all channels (Traditional EPG)
-- Everything in a static html file
-- Easy to integrate into html iptv player
+Optional override:
 
-V2 update:
-- Added support for compressed file formats (`.gz` and `.zip` files)
-- Added error handling for malformed EPGs
+`http://homeassistant.local:8123/local/epg/epg.html?file=humax-epg.xml.gz`
 
-## Screenshots
+## Upstream usage
 
-![Local Image](./img/epg_all.png)
-![Local Image](./img/epg_all_hint.png)
-![Local Image](./img/epg_specific.png)
-![Local Image](./img/epg_specific%203.png)
-![Local Image](./img/epg_specific%202.png)
+Still supports `?file=<url>` as upstream documents.
 
-## CORS issue
+Demo pattern: https://dbghelp.github.io/epg.html?file=
 
-Here's a few ways to solve it:
-- Try to use incognito mode (may work)
-- Clone the epg.xml to your github or somewhere else and use that link instead
-- Find a web browser extension like "CORS Unblock"
-- Use a CORS proxy
-- Use other alternative links
+## Changes in this fork
 
-
+- Default EPG path: `humax-epg.xml` (relative)
+- Bundle `xml-epg.js` / `xml-epg.css` locally (works under `/local/epg/`)
+- Drop Shaka / M3U8 player deps (guide-only)
+- Auto-open the all-channels timeline after load
