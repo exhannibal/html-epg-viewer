@@ -1,7 +1,8 @@
 /**
  * Humax / HA enhancements for html-epg-viewer:
- * - live search in sidebar + timeline navbar
- * - rebuilds timeline with only matching channels + programmes
+ * - live search (sidebar + navbar) without stealing focus on refresh
+ * - rebuilds timeline with matching channels + programmes
+ * - hit heatmap row + previous/next navigation
  * - date/time jump navigation
  */
 (function (global) {
@@ -41,9 +42,7 @@
   }
 
   function buildFilteredChannels(all, q) {
-    if (!q) {
-      return all.slice();
-    }
+    if (!q) return all.slice();
     var out = [];
     all.forEach(function (ch) {
       var nameHit = channelNameMatches(ch, q);
@@ -56,26 +55,8 @@
         tvgId: ch.tvgId,
         channelName: ch.channelName,
         tvgLogo: ch.tvgLogo,
-        // Name-only match → keep full schedule; otherwise only matching programmes
-        programList: nameHit && !progHits.length ? fullList.slice() : progHits.length ? progHits : fullList.slice(),
-        _filterMode: nameHit && progHits.length ? 'both' : nameHit ? 'channel' : 'programmes',
+        programList: progHits.length ? progHits.slice() : fullList.slice(),
       });
-    });
-    // Prefer programme-filtered list when there are title hits even if name also hits
-    out.forEach(function (ch, idx) {
-      var original = all.find(function (c) {
-        return c.tvgId === ch.tvgId;
-      });
-      if (!original) return;
-      var nameHit = channelNameMatches(original, q);
-      var progHits = (original.programList || []).filter(function (p) {
-        return programMatches(p, q);
-      });
-      if (progHits.length) {
-        out[idx].programList = progHits;
-      } else if (nameHit) {
-        out[idx].programList = (original.programList || []).slice();
-      }
     });
     return out;
   }
@@ -88,26 +69,40 @@
     this.searchInput = opts.searchInput;
     this.getChannels = opts.getChannels;
     this._lastQuery = '';
+    this._appliedQuery = null;
     this._debounce = null;
     this._bar = null;
+    this._hitRail = null;
     this._bounds = null;
     this._rebuildTimer = null;
     this._viewChannels = null;
+    this._hits = [];
+    this._hitIndex = -1;
+    this._navResizeBound = false;
+    this._barWired = false;
+    this._hitWired = false;
   }
 
   HumaxEpgUi.prototype._bindSearchInput = function (el) {
-    if (!el) return;
+    if (!el || el.dataset.humaxBound) return;
+    el.dataset.humaxBound = '1';
     var self = this;
     el.addEventListener('input', function () {
       clearTimeout(self._debounce);
       self._debounce = setTimeout(function () {
         self.applySearch(el.value);
-      }, 150);
+      }, 220);
     });
     el.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') {
         el.value = '';
         self.applySearch('');
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (e.shiftKey) self.goToHit(self._hitIndex - 1);
+        else self.goToHit(self._hitIndex + 1);
       }
     });
   };
@@ -129,14 +124,64 @@
     };
   };
 
+  HumaxEpgUi.prototype._captureSearchFocus = function () {
+    var a = document.activeElement;
+    if (!a) return null;
+    if (a.id === 'epg-nav-search') {
+      return {
+        which: 'nav',
+        start: a.selectionStart,
+        end: a.selectionEnd,
+        value: a.value,
+      };
+    }
+    if (this.searchInput && a === this.searchInput) {
+      return {
+        which: 'side',
+        start: a.selectionStart,
+        end: a.selectionEnd,
+        value: a.value,
+      };
+    }
+    return null;
+  };
+
+  HumaxEpgUi.prototype._restoreSearchFocus = function (state) {
+    if (!state) return;
+    var self = this;
+    requestAnimationFrame(function () {
+      var el =
+        state.which === 'nav'
+          ? document.getElementById('epg-nav-search')
+          : self.searchInput;
+      if (!el) return;
+      el.focus();
+      try {
+        var len = el.value.length;
+        var s = Math.min(state.start == null ? len : state.start, len);
+        var e = Math.min(state.end == null ? len : state.end, len);
+        el.setSelectionRange(s, e);
+      } catch (err) {
+        /* ignore */
+      }
+    });
+  };
+
+  HumaxEpgUi.prototype._detachChrome = function () {
+    if (this._bar && this._bar.parentNode) {
+      this._bar.parentNode.removeChild(this._bar);
+    }
+    if (this._hitRail && this._hitRail.parentNode) {
+      this._hitRail.parentNode.removeChild(this._hitRail);
+    }
+  };
+
   HumaxEpgUi.prototype.ensureNavBar = function () {
     var thead = this.epgContainer && this.epgContainer.querySelector('.thead');
     if (!thead) return;
 
-    var created = false;
-    var bar = this._bar;
-    if (!bar || !bar.id) {
-      bar = document.createElement('div');
+    if (!this._bar) {
+      var bar = document.createElement('div');
       bar.id = 'epg-nav-bar';
       bar.innerHTML =
         '<div class="epg-nav-group epg-nav-search">' +
@@ -159,19 +204,18 @@
         '<button type="button" data-nav="h+3" title="Forward 3 hours">+3h</button>' +
         '</div>';
       this._bar = bar;
-      created = true;
     }
 
-    // Sit as the first row inside .thead, above Day/Time
-    if (bar.parentNode !== thead || thead.firstElementChild !== bar) {
-      thead.insertBefore(bar, thead.firstChild);
+    if (thead.firstElementChild !== this._bar) {
+      thead.insertBefore(this._bar, thead.firstChild);
     }
 
-    if (created) {
+    if (!this._barWired) {
+      this._barWired = true;
       this._syncNavInputs(new Date());
-      this._bindSearchInput(bar.querySelector('#epg-nav-search'));
+      this._bindSearchInput(this._bar.querySelector('#epg-nav-search'));
       var self = this;
-      bar.addEventListener('click', function (e) {
+      this._bar.addEventListener('click', function (e) {
         var btn = e.target.closest('button[data-nav]');
         if (!btn) return;
         var action = btn.getAttribute('data-nav');
@@ -181,10 +225,10 @@
         }
         self._handleNav(action);
       });
-      bar.querySelector('#epg-nav-date').addEventListener('change', function () {
+      this._bar.querySelector('#epg-nav-date').addEventListener('change', function () {
         self._handleNav('go');
       });
-      bar.querySelector('#epg-nav-time').addEventListener('keydown', function (e) {
+      this._bar.querySelector('#epg-nav-time').addEventListener('keydown', function (e) {
         if (e.key === 'Enter') self._handleNav('go');
       });
       if (!this._navResizeBound) {
@@ -202,28 +246,172 @@
     this.showNavBar();
   };
 
+  HumaxEpgUi.prototype.ensureHitRail = function () {
+    var thead = this.epgContainer && this.epgContainer.querySelector('.thead');
+    if (!thead || !this._bar) return;
+
+    if (!this._hitRail) {
+      var rail = document.createElement('div');
+      rail.id = 'epg-hit-rail';
+      rail.innerHTML =
+        '<div class="epg-hit-controls">' +
+        '<button type="button" data-hit="prev" title="Previous hit (Shift+Enter)">◀ Hit</button>' +
+        '<span id="epg-hit-pos">—</span>' +
+        '<button type="button" data-hit="next" title="Next hit (Enter)">Hit ▶</button>' +
+        '</div>' +
+        '<div class="epg-hit-map" id="epg-hit-map"></div>';
+      this._hitRail = rail;
+    }
+
+    // Below nav, above Day/Time row
+    if (this._hitRail.parentNode !== thead || this._bar.nextElementSibling !== this._hitRail) {
+      if (this._bar.nextSibling) {
+        thead.insertBefore(this._hitRail, this._bar.nextSibling);
+      } else {
+        thead.appendChild(this._hitRail);
+      }
+    }
+
+    if (!this._hitWired) {
+      this._hitWired = true;
+      var self = this;
+      this._hitRail.addEventListener('click', function (e) {
+        var btn = e.target.closest('button[data-hit]');
+        if (!btn) return;
+        if (btn.getAttribute('data-hit') === 'prev') self.goToHit(self._hitIndex - 1);
+        else self.goToHit(self._hitIndex + 1);
+      });
+      this._hitRail.addEventListener('click', function (e) {
+        var mark = e.target.closest('.epg-hit-mark');
+        if (!mark) return;
+        var idx = parseInt(mark.dataset.hitIndex, 10);
+        if (!isNaN(idx)) self.goToHit(idx);
+      });
+    }
+
+    this._renderHitRail();
+  };
+
+  HumaxEpgUi.prototype._buildHitList = function (channels, q) {
+    var hits = [];
+    if (!q) return hits;
+    channels.forEach(function (ch) {
+      (ch.programList || []).forEach(function (p) {
+        if (!programMatches(p, q)) return;
+        hits.push({
+          startDate: p.startDate,
+          stopDate: p.stopDate,
+          title: p.title,
+          channelName: ch.channelName,
+          tvgId: ch.tvgId,
+        });
+      });
+    });
+    hits.sort(function (a, b) {
+      return a.startDate - b.startDate;
+    });
+    return hits;
+  };
+
+  HumaxEpgUi.prototype._renderHitRail = function () {
+    if (!this._hitRail) return;
+    var q = this._lastQuery;
+    var map = this._hitRail.querySelector('#epg-hit-map');
+    var pos = this._hitRail.querySelector('#epg-hit-pos');
+    var x = this.xmlepg;
+
+    if (!q || !this._hits.length || !x || !this._bounds) {
+      this._hitRail.classList.remove('epg-hit-rail-visible');
+      if (map) map.innerHTML = '';
+      if (pos) pos.textContent = '—';
+      return;
+    }
+
+    this._hitRail.classList.add('epg-hit-rail-visible');
+    var mapWidth = this._bounds.timelineLength * x.oneUnit;
+    map.style.width = mapWidth + 'px';
+    map.innerHTML = '';
+
+    var self = this;
+    this._hits.forEach(function (hit, i) {
+      var mins = x.getMinutesSinceEarliestStartDate(
+        self._bounds.earliestStartDate,
+        hit.startDate
+      );
+      var dur = Math.max(
+        4,
+        x.getDurationInMinutes(hit.startDate, hit.stopDate) * x.oneUnit
+      );
+      var mark = document.createElement('div');
+      mark.className = 'epg-hit-mark' + (i === self._hitIndex ? ' active' : '');
+      mark.dataset.hitIndex = String(i);
+      mark.style.left = mins * x.oneUnit + 'px';
+      mark.style.width = Math.min(dur, 80) + 'px';
+      mark.title = hit.channelName + ' — ' + hit.title;
+      map.appendChild(mark);
+    });
+
+    if (pos) {
+      pos.textContent =
+        this._hitIndex >= 0
+          ? this._hitIndex + 1 + ' / ' + this._hits.length
+          : '0 / ' + this._hits.length;
+    }
+  };
+
+  HumaxEpgUi.prototype.goToHit = function (index) {
+    if (!this._hits.length) return;
+    var n = this._hits.length;
+    var i = ((index % n) + n) % n;
+    this._hitIndex = i;
+    var hit = this._hits[i];
+    this.scrollToDateTime(hit.startDate);
+    this._syncNavInputs(hit.startDate);
+    this._renderHitRail();
+    this._flashHitProgramme(hit);
+  };
+
+  HumaxEpgUi.prototype._flashHitProgramme = function (hit) {
+    var rows = this.epgContainer.querySelectorAll('.table > .row');
+    rows.forEach(function (row) {
+      if (row.dataset.tvgId !== hit.tvgId) return;
+      row.querySelectorAll('.program-cell').forEach(function (cell) {
+        cell.classList.remove('search-hit-active');
+        if (cell.dataset.startMs === String(hit.startDate.getTime())) {
+          cell.classList.add('search-hit-active');
+          cell.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        }
+      });
+    });
+  };
+
   HumaxEpgUi.prototype._syncNavWidth = function () {
     if (!this._bar || !this.epgContainer) return;
     this._bar.style.width = this.epgContainer.clientWidth + 'px';
   };
 
   HumaxEpgUi.prototype._syncSearchInputs = function (raw) {
-    var val = raw == null ? '' : String(raw).trim();
-    if (this.searchInput && this.searchInput.value !== val) {
-      this.searchInput.value = val;
+    var val = raw == null ? '' : String(raw);
+    // Keep typed value including trailing spaces while focusing; trim only for query
+    if (this.searchInput && document.activeElement !== this.searchInput) {
+      if (this.searchInput.value !== val) this.searchInput.value = val;
     }
     var navSearch = document.getElementById('epg-nav-search');
-    if (navSearch && navSearch.value !== val) {
-      navSearch.value = val;
+    if (navSearch && document.activeElement !== navSearch) {
+      if (navSearch.value !== val) navSearch.value = val;
     }
   };
 
   HumaxEpgUi.prototype.showNavBar = function () {
     if (this._bar) this._bar.classList.add('epg-nav-visible');
+    if (this._hitRail && this._lastQuery) {
+      this._hitRail.classList.add('epg-hit-rail-visible');
+    }
   };
 
   HumaxEpgUi.prototype.hideNavBar = function () {
     if (this._bar) this._bar.classList.remove('epg-nav-visible');
+    if (this._hitRail) this._hitRail.classList.remove('epg-hit-rail-visible');
   };
 
   HumaxEpgUi.prototype._syncNavInputs = function (d) {
@@ -245,21 +433,13 @@
   HumaxEpgUi.prototype._handleNav = function (action) {
     var base = this._readNavDateTime() || new Date();
     var d = new Date(base.getTime());
-    if (action === 'now') {
-      d = new Date();
-    } else if (action === 'day-1') {
-      d.setDate(d.getDate() - 1);
-    } else if (action === 'day+1') {
-      d.setDate(d.getDate() + 1);
-    } else if (action === 'h-3') {
-      d.setHours(d.getHours() - 3);
-    } else if (action === 'h-1') {
-      d.setHours(d.getHours() - 1);
-    } else if (action === 'h+1') {
-      d.setHours(d.getHours() + 1);
-    } else if (action === 'h+3') {
-      d.setHours(d.getHours() + 3);
-    }
+    if (action === 'now') d = new Date();
+    else if (action === 'day-1') d.setDate(d.getDate() - 1);
+    else if (action === 'day+1') d.setDate(d.getDate() + 1);
+    else if (action === 'h-3') d.setHours(d.getHours() - 3);
+    else if (action === 'h-1') d.setHours(d.getHours() - 1);
+    else if (action === 'h+1') d.setHours(d.getHours() + 1);
+    else if (action === 'h+3') d.setHours(d.getHours() + 3);
     this._syncNavInputs(d);
     this.scrollToDateTime(d);
   };
@@ -322,7 +502,6 @@
   };
 
   HumaxEpgUi.prototype.openChannelDetail = function (channel) {
-    // Use currently filtered channel object (already has filtered programList)
     var q = this._lastQuery;
     var list = channel.programList || [];
     this.epgContainer.style.display = 'none';
@@ -330,10 +509,7 @@
     if (this.overlay) this.overlay.style.display = 'flex';
     var oldNote = document.getElementById('overlay-search-note');
     if (oldNote) oldNote.remove();
-
-    // displayPrograms looks up by tvgId on xmlepg.channels — keep view channels mounted
     this.xmlepg.displayPrograms('overlay', channel.tvgId);
-
     if (q && list.length && this.overlay) {
       var note = document.createElement('div');
       note.id = 'overlay-search-note';
@@ -342,8 +518,9 @@
         list.length +
         ' programme' +
         (list.length === 1 ? '' : 's') +
-        (q ? ' for “' + q + '”' : '') +
-        ' · Clear search for full schedule';
+        ' for “' +
+        q +
+        '” · Clear search for full schedule';
       this.overlay.insertBefore(note, this.overlay.firstChild);
     }
   };
@@ -363,6 +540,11 @@
     if (!x) return;
     if (!this._bounds) this.captureBounds();
     var bounds = this._bounds;
+    var focus = this._captureSearchFocus();
+
+    // Keep chrome nodes alive across innerHTML wipe
+    this._detachChrome();
+
     this._viewChannels = channels;
     x.channels = channels;
     if (bounds) {
@@ -373,37 +555,46 @@
     await x.displayAllPrograms('epg-container', 'xmlepg');
     this.annotateTimeline();
     this.ensureNavBar();
+    this.ensureHitRail();
+    this._restoreSearchFocus(focus);
+
     if (this.epgContainer.style.display !== 'none') {
-      x.clearTimelineNeedle && x.clearTimelineNeedle();
+      if (x.clearTimelineNeedle) x.clearTimelineNeedle();
       x.timelineNeedleRender();
     }
   };
 
   HumaxEpgUi.prototype.applySearch = function (raw) {
     var self = this;
-    var q = (raw || '').trim().toLowerCase();
+    var typed = raw == null ? '' : String(raw);
+    var q = typed.trim().toLowerCase();
+    var queryChanged = q !== this._appliedQuery;
     this._lastQuery = q;
-    this._syncSearchInputs(raw == null ? '' : String(raw).trim());
+
+    // Don't overwrite the focused field while typing
+    this._syncSearchInputs(typed);
 
     var all = this.getChannels() || [];
     var filtered = buildFilteredChannels(all, q);
     this._markHits(filtered, q);
-
-    // Sidebar + timeline share the same filtered set
     this.renderPlaylist(filtered);
 
-    var progCount = 0;
-    filtered.forEach(function (ch) {
-      progCount += (ch.programList || []).length;
-    });
+    this._hits = this._buildHitList(filtered, q);
+    if (queryChanged) {
+      this._hitIndex = this._hits.length ? 0 : -1;
+      this._appliedQuery = q;
+    } else if (this._hitIndex >= this._hits.length) {
+      this._hitIndex = this._hits.length ? 0 : -1;
+    }
+
     var statusText = '';
     if (q) {
       statusText =
         filtered.length +
         ' ch · ' +
-        progCount +
-        ' prog' +
-        (progCount === 1 ? '' : 's');
+        this._hits.length +
+        ' hit' +
+        (this._hits.length === 1 ? '' : 's');
     }
     var status = document.getElementById('search-status');
     if (status) status.textContent = statusText;
@@ -413,28 +604,19 @@
     clearTimeout(this._rebuildTimer);
     this._rebuildTimer = setTimeout(function () {
       self.rebuildTimeline(filtered).then(function () {
-        if (!q) return;
-        var first = null;
-        filtered.some(function (ch) {
-          return (ch.programList || []).some(function (p) {
-            if (p._searchHit || programMatches(p, q)) {
-              first = p.startDate;
-              return true;
-            }
-            return false;
-          });
-        });
-        if (first) {
-          self.scrollToDateTime(first);
-          self._syncNavInputs(first);
+        if (queryChanged && self._hitIndex >= 0) {
+          self.goToHit(self._hitIndex);
+        } else {
+          self._renderHitRail();
         }
       });
-    }, 80);
+    }, 200);
   };
 
   HumaxEpgUi.prototype.onTimelineOpened = function () {
     this.captureBounds();
     this.ensureNavBar();
+    this.ensureHitRail();
     if (this._lastQuery) {
       this.applySearch(this._lastQuery);
     } else {
@@ -443,6 +625,9 @@
       this.annotateTimeline();
       this._syncNavInputs(new Date());
       this.renderPlaylist(this._viewChannels);
+      this._hits = [];
+      this._hitIndex = -1;
+      this._renderHitRail();
     }
   };
 

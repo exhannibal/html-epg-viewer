@@ -12,6 +12,16 @@
 #epg-nav-bar button{background:#61dafb;color:#000;border:none;border-radius:5px;padding:6px 10px;cursor:pointer;font-weight:600}
 #epg-nav-bar button:hover{background:#4fa3c4}
 #epg-nav-bar input[type=date],#epg-nav-bar input[type=time]{background:#3c4043;color:#fff;border:1px solid #555;border-radius:5px;padding:5px 8px}
+#epg-hit-rail{display:none;flex-direction:row;align-items:stretch;width:max-content;min-height:28px;background:#111;border-bottom:1px solid #444;z-index:1001}
+#epg-hit-rail.epg-hit-rail-visible{display:flex}
+.epg-hit-controls{position:sticky;left:0;z-index:1002;display:flex;align-items:center;gap:8px;width:200px;min-width:200px;box-sizing:border-box;padding:4px 8px;background:#1a1d22;border-right:1px solid #444;color:#fff;font-size:12px}
+.epg-hit-controls button{background:#61dafb;color:#000;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-weight:600;font-size:12px}
+.epg-hit-controls button:hover{background:#4fa3c4}
+#epg-hit-pos{min-width:3.5em;text-align:center;color:#9ad}
+.epg-hit-map{position:relative;height:28px;background:linear-gradient(#1a2228,#12161a)}
+.epg-hit-mark{position:absolute;top:4px;height:20px;min-width:4px;background:#61dafb;border-radius:2px;opacity:.75;cursor:pointer;box-sizing:border-box}
+.epg-hit-mark:hover,.epg-hit-mark.active{opacity:1;outline:2px solid #fff;background:#4fc3f7;z-index:2}
+.program-cell.search-hit-active{outline:3px solid #ffeb3b!important;background-color:#5a4a10!important}
 #search-status{font-size:.8em;color:#9ad;min-height:1.2em;margin:0 0 8px}
 #overlay-search-note{width:98%;margin:8px auto;padding:10px 14px;background:#1e4a5a;border:1px solid #61dafb;border-radius:6px;color:#fff;font-size:.95em}
 #close-button{z-index:10060;position:fixed;top:20px;right:20px}
